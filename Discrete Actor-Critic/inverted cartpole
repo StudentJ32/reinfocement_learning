@@ -1,0 +1,131 @@
+import tensorflow as tf
+import numpy as np
+import itertools
+import gym
+
+env=gym.make('CartPole-v0')
+env._max_episode_steps=500
+env.seed(1)
+np.random.seed(2)
+tf.set_random_seed(2)
+
+class PolicyEstimator():
+    def __init__(self, learning_rate,scope ="policy_estimator"):
+        with tf.variable_scope(scope):
+            self.learning_rate = learning_rate
+            self.state = tf.placeholder(tf.float32,[None,env.observation_space.shape[0]],"state")
+            self.action = tf.placeholder(tf.int32,None,"action")
+            self.td_error = tf.placeholder(tf.float32,None,"target")
+            
+            self.hidden_layer = tf.contrib.layers.fully_connected(
+                inputs = self.state,
+                num_outputs = 20,
+                activation_fn = tf.nn.relu,
+                weights_initializer= tf.random_normal_initializer(0.0,0.1),
+                biases_initializer=tf.zeros_initializer())
+            self.action_prob = tf.contrib.layers.fully_connected(
+                inputs = self.hidden_layer,
+                num_outputs = env.action_space.n,
+                activation_fn = tf.nn.softmax,
+                weights_initializer= tf.random_normal_initializer(0.0,0.1),
+                biases_initializer=tf.zeros_initializer())
+
+            self.picked_action_prob = self.action_prob[0,self.action] #pi(A|s)
+            self.loss = -tf.log(self.picked_action_prob)*self.td_error
+
+            self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
+            self.train = self.optimizer.minimize(self.loss)
+
+    def predict(self,state,sess=None):
+        sess = sess or tf.get_default_session()
+        state = state[np.newaxis,:]
+        #print(sess.run(self.action_prob,feed_dict={self.state:state}))
+        return(sess.run(self.action_prob,feed_dict={self.state:state}))
+
+    def update(self,td_error,action,state,sess=None):
+        sess = sess or tf.get_default_session()
+        state = state[np.newaxis,:]
+        _,loss = sess.run([self.train,self.loss],feed_dict={self.state:state,self.td_error:td_error,self.action:action})
+        return loss
+
+
+class ValueEstimator():
+    def __init__(self, learning_rate,scope = "value_estimator"):
+        with tf.variable_scope(scope):
+            self.learning_rate = learning_rate
+            self.state = tf.placeholder(tf.float32,[None,env.observation_space.shape[0]],"state")
+            self.target = tf.placeholder(tf.float32,None,"target")
+            
+            self.hidden_layer = tf.contrib.layers.fully_connected(
+                inputs = self.state,
+                num_outputs = 20,
+                activation_fn = tf.nn.relu,
+                weights_initializer= tf.random_normal_initializer(0.0,0.1),
+                biases_initializer=tf.zeros_initializer()
+                )
+            self.value = tf.contrib.layers.fully_connected(
+                inputs = self.hidden_layer,
+                num_outputs = 1,
+                activation_fn = None,
+                weights_initializer= tf.random_normal_initializer(0.0,0.1),
+                biases_initializer=tf.zeros_initializer()
+                )
+
+
+            self.loss = tf.squared_difference(self.value,self.target)
+            self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
+            self.train = self.optimizer.minimize(self.loss)
+
+    def predict(self,state,sess=None):
+        sess = sess or tf.get_default_session()
+        state = state[np.newaxis,:]
+        return(sess.run(self.value,feed_dict={self.state:state}))
+
+    def update(self,state,target,sess=None):
+        sess = sess or tf.get_default_session()
+        state = state[np.newaxis,:]
+        _,loss = sess.run([self.train,self.loss],feed_dict={self.state:state,self.target:target})
+        #print(loss)
+        return(loss)
+
+
+def Actor_Critic(env,Actor,Critic,num_episodes,discount_factor):
+    
+    episode_reward=np.zeros(num_episodes)
+
+    for i in range(num_episodes):
+        state = env.reset()
+        total_reward=0
+        for t in itertools.count():
+            #env.render()
+            action_probs = Actor.predict(state)
+            action = np.random.choice(np.arange(env.action_space.n),p = action_probs.ravel())
+            next_state,reward,done,_ = env.step(action)
+            if done:
+                reward = -20
+            
+            td_target = reward+discount_factor*Critic.predict(next_state)
+            td_error = td_target-Critic.predict(state)
+                
+            Critic.update(state,td_target)
+            Actor.update(td_error,action,state)
+
+            total_reward+=reward
+            state = next_state
+
+            if done:
+                break
+
+        episode_reward[i]= total_reward
+        print("episode{}: reward: {}".format(i,total_reward))
+
+
+tf.reset_default_graph()
+
+global_step = tf.Variable(0, name="global_step", trainable=False)
+Actor = PolicyEstimator(learning_rate=0.002)
+Critic = ValueEstimator(learning_rate=0.01)
+discount_factor = 0.99
+with tf.Session() as sess:
+    sess.run(tf.global_variables_initializer())
+    Actor_Critic(env,Actor,Critic,1000,discount_factor)
