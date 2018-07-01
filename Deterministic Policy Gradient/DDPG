@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jun 29 14:55:27 2018
+
+@author: jason
+"""
+
+import gym
+import tensorflow as tf
+import numpy as np
+import itertools
+from Replay_Buffer import replay_buffer
+
+env = gym.make('Pendulum-v0')
+
+class Value_Estimator:
+    def __init__(self,lr,tau):
+        self.learning_rate = lr
+        self.tau = tau
+        
+        #create networks
+        self.q_predict = self.value_network('q_net')
+        self.q_target_predict = self.value_network('target_q_net')
+        self.q_para = [t for t in tf.trainable_variables() if t.name.startwith('q_net')]
+        self.q_target_para = [t for t in tf.trainable_variables() if t.name.startwith('target_q_net')]
+        #claim inputs
+        self.state = tf.placeholder(tf.float32,[None,env.observation_space.shape[0]])
+        self.picked_action = tf.placeholder(tf.float32,[None,env.action_space.n])
+        self.predicted_q = tf.placeholde(tf.float32,[None,1])
+        #loss and optimize:
+        self.loss = tf.reduce_mean(tf.squared_difference(self.q_predict,self.predicted_q))
+        self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
+        self.train_op = self.optimizer.minimize(self.loss)
+        #target network update
+        self.target_net_update = \
+        [self.q_target_para[i].assign(tf.multiply(self.q_para,self.tau)+tf.multiply(self.q_target_para,1-self.tau))\
+         for i in range(len(self.q_target_para))]
+        self.action_gradient = tf.gradients(self.q_predict,self.picked_action)
+    def value_network(self,scope):
+            with tf.variable_scope(scope):
+                h_s1 = tf.contrib.layers.fully_connected(
+                        inputs = self.state,
+                        num_outputs = 400)
+                h_s1norm = tf.nn.batch_normalization(h_s1)
+                h_s2 = tf.contrib.layers.fully_connected(
+                        inputs = h_s1norm,
+                        num_outputs = 300,
+                        activation_fn = tf.nn.relu)
+                h_a = tf.contrib.layers.fully_connected(
+                        inputs = self.picked_action,
+                        num_outputs = 300,
+                        activation_fn = tf.nn.relu)
+                q = tf.contrib.layers.fully_connected(
+                        inputs = [h_a,h_s2],
+                        num_outputs = 1)
+                return q     
+
+         
+            
+    def target_predict(self,state,picked_action,sess=None):
+        sess = sess or tf.get_default_session()
+        return(sess.run(self.q_target_predict,feed_dict = {self.state: state,self.picked_action: picked_action}))
+        
+    def train(self,state,q_target,picked_action,sess = None):
+        sess = sess or tf.get_default_session()
+        _,loss = sess.run([self.train_op,self.loss],feed_dict = {self.state:state,self.picked_action:picked_action,\
+                          self.predicted_q:q_target})
+    
+    def act_grad(self,state,picked_action,sess=None):
+        sess = sess or tf.get_default_session()
+        return(sess.run(self.action_gradient,feed_dict = {self.state:state,self.picked_action:picked_action}))
+        
+    def target_net_update(self,sess=None):
+        sess = sess or tf.get_default_session()
+        sess.run(self.target_net_update)
+    
+    
+class Policy_Estimator():
+    def __init__(self,lr,tau,batch_size):
+        self.learning_rate=lr
+        self.tau = tau
+        self.batch_size = batch_size
+        
+        self.state = tf.placeholder(tf.float32,[None,env.observation_space.shape[0]])
+        self.action_gradiet = tf.placeholder(tf.float32,[None,env.action_space.n])
+        
+        self.action = self.actor_network('actor')
+        self.target_action = self.actor_network('target_actor')
+        self.actor_para = [t for t in tf.trainable_variables() if t.name.startwith('actor')]
+        self.actor_target_para = [t for t in tf.trainable_variables() if t.name.startwith('target_actor')]
+        
+        #train actor_network
+        self.actor_gradient = tf.gradients(self.action,self.actor_para,-self.action_gradient)
+        self.actor_gradient_normalized = list(map(lambda x: tf.div(x,self.batch_size),self.actor_gradient))
+        self.train_op = tf.train.AdamOptimizer(self.learning_rate).apply_gradients(self.actor_gradient)
+        
+        #update target network
+        self.target_updatet = \
+        [self.actor_target_para[i].assign(tf.multiply(self.actor_para,self.tau)+\
+         tf.multiply(self.actor_target_para,1-self.tau)) for i in range(len(self.actor_target_para))]
+    
+    def actor_network(self,scope):
+        with tf.variable_scope(scope):
+            h1 = tf.contrib.layers.fully_connected(
+                    inputs = self.state,
+                    num_outputs = 400)
+            h1_norm = tf.layers.batch_normalization(h1)
+            h2 = tf.contrib.layers.fully_connected(
+                    inputs = h1_norm,
+                    num_outputs = 300,
+                    activation_fn = tf.nn.relu)
+            action = tf.contrib.layers.fully_connected(
+                    inputs = h2,
+                    num_outputs = env.action_space.n,
+                    activation_fn = tf.nn.tanh)
+            action = tf.multiply(action,env.action_space.high)
+            return action
+    #train actor network
+    def train(self,action_gradient,state,sess=None):
+        sess = sess or tf.get_default_session()
+        sess.run(self.train_op,feed_dict={self.state:state,self.action_gradiet:action_gradient})
+    #on scean action
+    def action_predict(self,state,sess=None):
+        sess = sess or tf.get_default_session()
+        return(sess.run(self.action,feed_dict={self.state:state}))
+    # action for target Q
+    def target_action_predict(self,state,sess=None):
+        sess = sess or tf.get_default_session()
+        return(sess.run(self.target_action,feed_dict={self.state:state}))
+    #Update target networ
+    def target_net_update(self,sess=None):
+        sess = sess or tf.get_default_session()
+        sess.run(self.target_net_update)
+
+
+
+
+def DDPG(Actor,Critic,maximum_eps,gamma,buffer):
+    episode_reward=np.zeros(maximum_eps)
+    Actor.target_net_update
+    Critic.target_net_update
+    for i in range(maximum_eps):
+        state = env.reset()
+        total_reward = 0
+        for t in itertools.count():
+            action = Actor.action_predict(state)
+            next_state,reward,done = env.step(action)
+            target_action = Actor.target_action_predict(state)
+            predicted_q = reward if done else reward + gamma*Critic.target_predict(state,target_action)
+
+            buffer.add(state,action,predicted_q)
+            s_batch,a_batch,q_target_batch = buffer.batch(30)
+            
+            Critic.train(s_batch,a_batch,q_target_batch)
+            action_gradients = Critic.act_grad(s_batch,a_batch)
+            Actor.train(action_gradients,s_batch)
+            
+            Actor.target_net_update
+            Critic.target_net_update
+            
+            total_reward+=reward
+            
+            if done: break
+        episode_reward[i] = total_reward
+            
+            
+            
+    
+tf.reset_default_graph()
+global_step = tf.Variable(0, name="global_step", trainable=False)
+
+        
+actor_lr = 0.001
+critic_lr = 0.0001 
+tau = 0.0005
+maximum_eps = 1000000
+gamma = 0.99
+Actor = Policy_Estimator(actor_lr,tau)
+Critic = Value_Estimator(critic_lr,tau)
+buffer = replay_buffer(1000000)
+with tf.Session() as sess:
+    sess.run(tf.global_variables_initializer())
+    DDPG(Actor,Critic,maximum_eps,gamma,buffer)
